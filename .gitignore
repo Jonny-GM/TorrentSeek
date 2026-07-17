@@ -1,0 +1,8 @@
+/bin/
+/dist/
+__pycache__/
+/torrentseek
+/torrentprobe
+/seekstorm
+/goseed
+/tracker

@@ -1,0 +1,48 @@
+name: Live Deluge test
+
+on:
+  workflow_dispatch:
+    inputs:
+      swarm:
+        description: "Run stage 2 (tracker + seeder swarm)"
+        type: boolean
+        default: true
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      # deluged plus its python library (delugectl.py drives the seeder
+      # through it) come from apt; libtorrent's compiled extension is tied
+      # to the system python ABI, so apt is the right source for it too.
+      - name: Install deluged
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y deluged python3-libtorrent python3-setuptools
+
+      # The PiecePriority plugin egg is built from a checkout of its repo
+      # (deluge-piece-priority, a separate public repository).
+      - name: Check out deluge-piece-priority
+        uses: actions/checkout@v4
+        with:
+          repository: Jonny-GM/deluge-piece-priority
+          path: deluge-piece-priority
+
+      - name: Run live harness
+        env:
+          SWARM: ${{ inputs.swarm && '1' || '0' }}
+          PIECEPRIORITY_SRC: ${{ github.workspace }}/deluge-piece-priority
+        run: ./test/live/run.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "=== torrentseek.log ==="; tail -100 /tmp/torrentseek-live/torrentseek.log || true
+          echo "=== deluged-leecher.log ==="; tail -60 /tmp/torrentseek-live/deluged-leecher.log || true
+          echo "=== deluged-seeder.log ==="; tail -60 /tmp/torrentseek-live/deluged-seeder.log || true

@@ -1,0 +1,91 @@
+name: Release
+
+# Three ways in:
+#   push to main        → rebuild the rolling "latest" prerelease
+#                         (version: v<commit date>-<short sha>)
+#   push tag v*         → versioned release for that tag
+#   workflow_dispatch   → "cut a release": tag HEAD with the given semver
+#                         version (a judgment call, so it's an explicit
+#                         input, never derived) and publish
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the cut mode checks existing tags
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Determine mode and version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag='${{ github.event.inputs.version }}'
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+              echo "version must look like v1.0.0, got: $tag" >&2; exit 1
+            fi
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              echo "tag $tag already exists" >&2; exit 1
+            fi
+            echo "mode=cut" >> "$GITHUB_OUTPUT"
+            echo "version=$tag" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "mode=tag" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=rolling" >> "$GITHUB_OUTPUT"
+            echo "version=v$(git log -1 --format=%cd --date=format:%Y.%m.%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build all platforms
+        run: VERSION='${{ steps.ver.outputs.version }}' ./scripts/release-build.sh
+
+      - name: Publish versioned release (pushed tag)
+        if: steps.ver.outputs.mode == 'tag'
+        run: |
+          gh release create '${{ steps.ver.outputs.version }}' dist/* \
+            --title '${{ steps.ver.outputs.version }}' \
+            --notes "TorrentSeek ${{ steps.ver.outputs.version }} ($(git rev-parse --short HEAD))"
+
+      - name: Cut versioned release (manual dispatch)
+        if: steps.ver.outputs.mode == 'cut'
+        run: |
+          git tag '${{ steps.ver.outputs.version }}'
+          git push origin '${{ steps.ver.outputs.version }}'
+          gh release create '${{ steps.ver.outputs.version }}' dist/* \
+            --title '${{ steps.ver.outputs.version }}' \
+            --notes "TorrentSeek ${{ steps.ver.outputs.version }} ($(git rev-parse --short HEAD))"
+
+      - name: Update rolling latest prerelease (main push)
+        if: steps.ver.outputs.mode == 'rolling'
+        run: |
+          gh release delete latest --yes || true
+          git push origin :refs/tags/latest || true
+          gh release create latest dist/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title 'latest (rolling) — ${{ steps.ver.outputs.version }}' \
+            --notes "Rolling build of main @ $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
